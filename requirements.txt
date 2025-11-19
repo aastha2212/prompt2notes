@@ -1,0 +1,44 @@
+# Core dependencies for Prompt2Notes MVP
+# CPU-friendly, open-source libraries
+
+# Web UI
+streamlit==1.28.1
+
+# ASR (Automatic Speech Recognition)
+faster-whisper>=1.0.0  # Faster Whisper implementation (2-4x faster, recommended)
+openai-whisper==20231117  # Fallback option
+
+# Embeddings
+sentence-transformers>=5.1.0  # Updated for compatibility with newer huggingface_hub
+torch>=2.2.0  # Updated for Python 3.12 compatibility
+transformers>=4.35.0
+
+# Vector Database
+chromadb==0.4.18
+
+# PDF Generation
+fpdf2==2.7.6
+
+# Video/Audio Processing
+moviepy==1.0.3
+pydub==0.25.1
+
+# Utilities
+numpy>=1.24.3
+Pillow>=10.1.0
+python-dotenv>=1.0.0
+requests>=2.31.0  # For downloading images/videos from URLs
+yt-dlp>=2023.10.7  # For YouTube video downloads
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
+
+# Logging and config
+pyyaml==6.0.1
+
+# Optional: LLM APIs (for better summaries and vision support)
+# Uncomment the lines below if you want to use external LLM APIs instead of local fallback
+# openai>=1.0.0  # For OpenAI API
+google-generativeai>=0.3.0  # For Google Gemini API (required for vision/image support)
+
