@@ -50,6 +50,7 @@ cache/
 
 # User data (contains passwords)
 users.json
+logininfo.txt
 
 # Logs
 *.log

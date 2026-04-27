@@ -6,7 +6,7 @@ A production-oriented, CPU-friendly application that processes video and image u
 https://www.youtube.com/watch?v=9-75eFEFULY
 ## Features
 
-- 📹 **Video & Image Upload**: Accepts MP4, WAV, and image files (including YouTube URLs)
+- 📹 **Video & Image Upload**: Accepts MP4, WAV, and image files
 - 🎤 **Automatic Transcription**: Uses faster-whisper (2-4x faster than standard Whisper)
 - 📝 **Timestamped Chunking**: Intelligent chunking with overlap for semantic continuity
 - 🔍 **Semantic Search**: Vector-based retrieval using all-MiniLM-L6-v2 embeddings
@@ -50,7 +50,7 @@ Prompt2Notes/
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.11+ (recommended for CI and hosting)
 - pip
 - FFmpeg (for video/audio processing)
 

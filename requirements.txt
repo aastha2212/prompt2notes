@@ -9,8 +9,8 @@ faster-whisper>=1.0.0  # Faster Whisper implementation (2-4x faster, recommended
 openai-whisper==20231117  # Fallback option
 
 # Embeddings
-sentence-transformers>=5.1.0  # Updated for compatibility with newer huggingface_hub
-torch>=2.2.0  # Updated for Python 3.12 compatibility
+sentence-transformers>=3.2.1  # Latest available series on PyPI
+torch>=2.2.0  # CPU wheels available for modern Python
 transformers>=4.35.0
 
 # Vector Database
