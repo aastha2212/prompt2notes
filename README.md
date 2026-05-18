@@ -2,8 +2,8 @@
 
 A production-oriented, CPU-friendly application that processes video and image uploads to generate timestamped transcripts, creates semantic embeddings, and provides RAG-powered summarization with PDF export capabilities.
 
-# Demo Video
-https://www.youtube.com/watch?v=9-75eFEFULY
+# Deployed on Streamlit
+https://prompt2notes-jikjxmvmyr2u6vwr8dumnm.streamlit.app
 ## Features
 
 - 📹 **Video & Image Upload**: Accepts MP4, WAV, and image files
