@@ -4,7 +4,7 @@ Unit tests for RAG prompt formatting and orchestration.
 
 import pytest
 from unittest.mock import Mock, MagicMock
-from backend.rag import RAGOrchestrator
+from backend.rag import RAGOrchestrator, clean_generated_answer
 
 
 @pytest.fixture
@@ -68,6 +68,39 @@ def test_rag_format_prompt_summary(mock_vectorstore, mock_embedder, sample_retri
     assert query in prompt
     assert "Summarize" in prompt or "summary" in prompt.lower()
     assert "chunk_1" in prompt or "Machine learning" in prompt
+    assert "[Chunk" not in prompt
+    assert "Do not mention chunks" in prompt
+
+
+def test_clean_generated_answer_removes_internal_citations():
+    """Model output should not leak retrieval labels to users."""
+    text = (
+        "Calmness creates space between stimulus and response "
+        "(Chunk 1, 3). A pilot's tone can prevent panic "
+        "(Chunk 6, visual 06:44)."
+    )
+
+    cleaned = clean_generated_answer(text)
+
+    assert "Chunk" not in cleaned
+    assert "visual" not in cleaned.lower()
+    assert "(3)" not in cleaned
+    assert cleaned == "Calmness creates space between stimulus and response. A pilot's tone can prevent panic."
+
+
+def test_rag_format_prompt_assistant(mock_vectorstore, mock_embedder, sample_retrieved_chunks):
+    """Unified assistant/chat prompt includes anti-filler and user message."""
+    rag = RAGOrchestrator(
+        vectorstore=mock_vectorstore,
+        embedder=mock_embedder,
+        llm_provider="local",
+    )
+    query = "Summarise in 100 words"
+    prompt = rag.format_prompt(query, sample_retrieved_chunks, prompt_type="assistant")
+    assert "User message:" in prompt
+    assert query in prompt
+    assert "This video is about:" in prompt
+    assert "Do not mention chunks, sources" in prompt
 
 
 def test_rag_format_prompt_notes(mock_vectorstore, mock_embedder, sample_retrieved_chunks):
@@ -227,4 +260,3 @@ def test_rag_hierarchical_summarize(mock_vectorstore, mock_embedder):
     assert "video_id" in result
     assert result["video_id"] == "video_1"
     assert len(result["micro_summaries"]) == len(chunks)
-

@@ -25,6 +25,7 @@ venv/
 env/
 ENV/
 .venv
+.venv*/
 
 # IDE
 .vscode/
@@ -69,5 +70,4 @@ coverage.xml
 *.cover
 
 # Streamlit
-.streamlit/
-
+.streamlit/secrets.toml

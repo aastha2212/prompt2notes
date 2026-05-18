@@ -115,6 +115,8 @@ def download_youtube_video(
         output_dir = Path(tempfile.gettempdir()) / "prompt2notes_downloads"
         output_dir.mkdir(parents=True, exist_ok=True)
     
+    output_path = None
+
     try:
         # Check if ffmpeg is available
         ffmpeg_available = check_ffmpeg_available()
@@ -201,6 +203,30 @@ def download_youtube_video(
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Failed to download YouTube video: {e}")
+
+        # YouTube frequently blocks automated downloads (SABR / PO token / 403).
+        # Convert these into a clear, user-facing error with next steps.
+        lower = error_msg.lower()
+        if (
+            "http error 403" in lower
+            or "403" in lower and "forbidden" in lower
+            or "po token" in lower
+            or "sabr" in lower
+            or "missing a url" in lower
+            or "sign in to confirm" in lower
+            or "this video is unavailable" in lower
+            or "private video" in lower
+            or "members-only" in lower
+            or "age-restricted" in lower
+        ):
+            raise RuntimeError(
+                "YouTube blocked this download (permission/anti-bot restriction).\n\n"
+                "What you can do:\n"
+                "- Try a different YouTube video (public, non-age-restricted, not members-only).\n"
+                "- Download the video locally (e.g., using your browser or a logged-in tool) and upload the file here.\n"
+                "- If you control the environment, updating `yt-dlp` can help when YouTube changes formats.\n\n"
+                f"Technical detail: {error_msg}"
+            ) from e
         
         # Check if error is related to HLS/fragments/ffmpeg
         if any(keyword in error_msg.lower() for keyword in ['fragment', 'hls', 'm3u8', 'empty', 'ffmpeg']):
@@ -229,7 +255,8 @@ def download_youtube_video(
 def download_image_from_url(
     url: str,
     output_dir: Optional[str] = None,
-    timeout: int = 30
+    timeout: int = 30,
+    max_bytes: int = 25 * 1024 * 1024
 ) -> Optional[str]:
     """
     Download image from URL.
@@ -257,7 +284,9 @@ def download_image_from_url(
     else:
         output_dir = Path(tempfile.gettempdir()) / "prompt2notes_downloads"
         output_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    output_path = None
+
     try:
         logger.info(f"Downloading image from URL: {url}")
         
@@ -267,6 +296,10 @@ def download_image_from_url(
         }
         response = requests.get(url, headers=headers, timeout=timeout, stream=True)
         response.raise_for_status()
+
+        total_size = int(response.headers.get('content-length', 0))
+        if total_size and total_size > max_bytes:
+            raise ValueError(f"Image is too large ({total_size / 1024 / 1024:.1f} MB)")
         
         # Determine file extension from URL or Content-Type
         content_type = response.headers.get('Content-Type', '')
@@ -290,21 +323,29 @@ def download_image_from_url(
         output_path = output_dir / filename
         
         # Save image
+        downloaded = 0
         with open(output_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+                if chunk:
+                    downloaded += len(chunk)
+                    if downloaded > max_bytes:
+                        raise ValueError(f"Image exceeds size limit ({max_bytes / 1024 / 1024:.1f} MB)")
+                    f.write(chunk)
         
         logger.info(f"Image downloaded: {output_path}")
         return str(output_path)
         
     except Exception as e:
+        if output_path and output_path.exists():
+            output_path.unlink()
         logger.error(f"Failed to download image: {e}")
         raise
 
 
 def download_video_from_url(
     url: str,
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    max_bytes: int = 500 * 1024 * 1024
 ) -> Optional[str]:
     """
     Download video from URL (non-YouTube).
@@ -332,6 +373,8 @@ def download_video_from_url(
         output_dir = Path(tempfile.gettempdir()) / "prompt2notes_downloads"
         output_dir.mkdir(parents=True, exist_ok=True)
     
+    output_path = None
+
     try:
         logger.info(f"Downloading video from URL: {url}")
         
@@ -341,6 +384,10 @@ def download_video_from_url(
         }
         response = requests.get(url, headers=headers, timeout=300, stream=True)
         response.raise_for_status()
+
+        total_size = int(response.headers.get('content-length', 0))
+        if total_size and total_size > max_bytes:
+            raise ValueError(f"Video is too large ({total_size / 1024 / 1024:.1f} MB)")
         
         # Determine file extension
         content_type = response.headers.get('Content-Type', '')
@@ -362,19 +409,21 @@ def download_video_from_url(
         output_path = output_dir / filename
         
         # Save video (streaming for large files)
-        total_size = int(response.headers.get('content-length', 0))
         downloaded = 0
         
         with open(output_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
-                    f.write(chunk)
                     downloaded += len(chunk)
+                    if downloaded > max_bytes:
+                        raise ValueError(f"Video exceeds size limit ({max_bytes / 1024 / 1024:.1f} MB)")
+                    f.write(chunk)
         
         logger.info(f"Video downloaded: {output_path} ({downloaded / 1024 / 1024:.2f} MB)")
         return str(output_path)
         
     except Exception as e:
+        if output_path and output_path.exists():
+            output_path.unlink()
         logger.error(f"Failed to download video: {e}")
         raise
-

@@ -9,6 +9,7 @@ import hashlib
 import logging
 from typing import Optional, Dict, Any
 from pathlib import Path
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +36,26 @@ class AuthManager:
     def _ensure_users_file(self):
         """Create users file if it doesn't exist."""
         if not self.users_file.exists():
-            # Create default admin user (username: admin, password: admin)
-            default_users = {
-                "admin": {
-                    "password_hash": self._hash_password("admin"),
-                    "email": "admin@prompt2notes.com",
-                    "created_at": "2024-01-01"
+            initial_username = os.getenv("PROMPT2NOTES_ADMIN_USERNAME", "").strip()
+            initial_password = os.getenv("PROMPT2NOTES_ADMIN_PASSWORD", "")
+            initial_email = os.getenv("PROMPT2NOTES_ADMIN_EMAIL", "").strip()
+
+            initial_users = {}
+            if initial_username and initial_password:
+                initial_users[initial_username] = {
+                    "password_hash": self._hash_password(initial_password),
+                    "email": initial_email,
+                    "created_at": datetime.now(timezone.utc).isoformat()
                 }
-            }
-            self._save_users(default_users)
-            logger.info(f"Created default users file at {self.users_file}")
-            logger.warning("Default admin user created: username='admin', password='admin' - Please change this!")
+                logger.info("Created initial admin user from environment")
+            elif initial_username or initial_password:
+                logger.warning(
+                    "PROMPT2NOTES_ADMIN_USERNAME and PROMPT2NOTES_ADMIN_PASSWORD "
+                    "must both be set to create an initial admin user"
+                )
+
+            self._save_users(initial_users)
+            logger.info(f"Created users file at {self.users_file}")
     
     def _load_users(self) -> Dict[str, Dict[str, Any]]:
         """Load users from JSON file."""
@@ -127,7 +137,7 @@ class AuthManager:
         users[username] = {
             "password_hash": self._hash_password(password),
             "email": email or "",
-            "created_at": str(Path(__file__).stat().st_mtime)  # Simple timestamp
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
         
         try:
@@ -216,4 +226,3 @@ def get_auth_manager() -> AuthManager:
     if not hasattr(get_auth_manager, '_instance'):
         get_auth_manager._instance = AuthManager()
     return get_auth_manager._instance
-

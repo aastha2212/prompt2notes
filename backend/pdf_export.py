@@ -5,6 +5,7 @@ PDF export functionality using FPDF for generating formatted notes.
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +35,33 @@ class PDFExporter:
         minutes = int(seconds // 60)
         secs = int(seconds % 60)
         return f"{minutes:02d}:{secs:02d}"
+
+    def _plain_text(self, text: str) -> str:
+        """Convert common Markdown output into clean PDF text."""
+        if not text:
+            return ""
+
+        cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+        cleaned = re.sub(r"```(?:\w+)?\n([\s\S]*?)```", r"\1", cleaned)
+        cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+        cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+        cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"(?<!\w)(\*\*|__)(.+?)\1(?!\w)", r"\2", cleaned)
+        cleaned = re.sub(r"(?<!\w)(\*|_)(.+?)\1(?!\w)", r"\2", cleaned)
+        cleaned = re.sub(r"^\s*[-*+]\s+", "- ", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
     
     def export_notes(
         self,
         output_path: str,
         title: str,
         summary: str,
-        evidence: List[Dict[str, Any]],
+        evidence: Optional[List[Dict[str, Any]]] = None,
         query: Optional[str] = None,
-        video_id: Optional[str] = None
+        video_id: Optional[str] = None,
+        include_metadata: bool = False,
+        include_evidence: bool = False,
     ) -> bool:
         """
         Export notes to PDF.
@@ -54,6 +73,8 @@ class PDFExporter:
             evidence: List of evidence chunks with metadata
             query: Original query (optional)
             video_id: Video identifier (optional)
+            include_metadata: Whether to include query/video_id/generated timestamp
+            include_evidence: Whether to include an evidence/references section
             
         Returns:
             True if successful
@@ -69,30 +90,31 @@ class PDFExporter:
             pdf.set_font("Arial", "B", 20)
             pdf.cell(0, 10, title, ln=1, align="C")
             pdf.ln(5)
+
+            # Metadata (optional). Default is OFF to keep PDFs presentation-ready.
+            if include_metadata:
+                pdf.set_font("Arial", "", 10)
+                if video_id:
+                    pdf.cell(0, 5, f"Video ID: {video_id}", ln=1)
+                pdf.cell(0, 5, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=1)
+                if query:
+                    pdf.cell(0, 5, f"Query: {query}", ln=1)
+                pdf.ln(5)
             
-            # Metadata
-            pdf.set_font("Arial", "", 10)
-            if video_id:
-                pdf.cell(0, 5, f"Video ID: {video_id}", ln=1)
-            pdf.cell(0, 5, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=1)
-            if query:
-                pdf.cell(0, 5, f"Query: {query}", ln=1)
-            pdf.ln(5)
-            
-            # Summary section
+            # Notes section (clean, no references)
             pdf.set_font("Arial", "B", 14)
-            pdf.cell(0, 8, "Summary", ln=1)
+            pdf.cell(0, 8, "Notes", ln=1)
             pdf.set_font("Arial", "", 11)
             
             # Split summary into lines that fit page width
-            summary_lines = self._wrap_text(summary, pdf.w - 40)
+            summary_lines = self._wrap_text(self._plain_text(summary), pdf.w - 40)
             for line in summary_lines:
                 pdf.cell(0, 6, line, ln=1)
             
             pdf.ln(5)
             
             # Evidence section
-            if evidence:
+            if include_evidence and evidence:
                 pdf.set_font("Arial", "B", 14)
                 pdf.cell(0, 8, "Evidence & References", ln=1)
                 pdf.set_font("Arial", "", 10)
@@ -109,7 +131,7 @@ class PDFExporter:
                     pdf.set_font("Arial", "", 10)
                     
                     # Chunk text
-                    text_lines = self._wrap_text(text, pdf.w - 40)
+                    text_lines = self._wrap_text(self._plain_text(text), pdf.w - 40)
                     for line in text_lines:
                         pdf.cell(0, 5, line, ln=1)
                     
@@ -135,24 +157,29 @@ class PDFExporter:
         Returns:
             List of wrapped lines
         """
-        # Simple word wrapping
-        words = text.split()
         lines = []
-        current_line = ""
-        
-        for word in words:
-            test_line = current_line + (" " if current_line else "") + word
-            # Approximate: 1 character ≈ 2 PDF units for Arial 10pt
-            if len(test_line) * 2 <= max_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        
-        if current_line:
-            lines.append(current_line)
-        
+
+        for paragraph in text.split("\n"):
+            if not paragraph.strip():
+                lines.append("")
+                continue
+
+            words = paragraph.split()
+            current_line = ""
+
+            for word in words:
+                test_line = current_line + (" " if current_line else "") + word
+                # Approximate: 1 character is about 2 PDF units for Arial 10pt.
+                if len(test_line) * 2 <= max_width:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+
+            if current_line:
+                lines.append(current_line)
+
         return lines if lines else [text]
     
     def export_hierarchical_notes(
@@ -196,7 +223,7 @@ class PDFExporter:
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 8, "Overview", ln=1)
             pdf.set_font("Arial", "", 11)
-            summary_lines = self._wrap_text(meta_summary, pdf.w - 40)
+            summary_lines = self._wrap_text(self._plain_text(meta_summary), pdf.w - 40)
             for line in summary_lines:
                 pdf.cell(0, 6, line, ln=1)
             
@@ -212,7 +239,7 @@ class PDFExporter:
                     pdf.set_font("Arial", "B", 11)
                     pdf.cell(0, 6, f"[{self._format_timestamp(ms['start'])} - {self._format_timestamp(ms['end'])}]", ln=1)
                     pdf.set_font("Arial", "", 10)
-                    summary_lines = self._wrap_text(ms['summary'], pdf.w - 40)
+                    summary_lines = self._wrap_text(self._plain_text(ms['summary']), pdf.w - 40)
                     for line in summary_lines:
                         pdf.cell(0, 5, line, ln=1)
                     pdf.ln(3)
@@ -224,4 +251,3 @@ class PDFExporter:
         except Exception as e:
             logger.error(f"Hierarchical PDF export failed: {e}")
             raise
-

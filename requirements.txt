@@ -6,7 +6,10 @@ streamlit==1.28.1
 
 # ASR (Automatic Speech Recognition)
 faster-whisper>=1.0.0  # Faster Whisper implementation (2-4x faster, recommended)
-openai-whisper==20231117  # Fallback option
+# NOTE: `openai-whisper` is intentionally not installed by default because it
+# often builds from source and can fail on newer Python environments.
+# If you want the fallback, install it manually:
+#   pip install openai-whisper
 
 # Embeddings
 sentence-transformers>=3.2.1  # Latest available series on PyPI
@@ -24,7 +27,8 @@ moviepy==1.0.3
 pydub==0.25.1
 
 # Utilities
-numpy>=1.24.3
+# Pin numpy to avoid rare macOS/Python segfaults with some wheel builds.
+numpy==1.26.4
 Pillow>=10.1.0
 python-dotenv>=1.0.0
 requests>=2.31.0  # For downloading images/videos from URLs

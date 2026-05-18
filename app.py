@@ -65,6 +65,10 @@ if "last_query_result" not in st.session_state:
     st.session_state.last_query_result = None
 if "frame_paths" not in st.session_state:
     st.session_state.frame_paths = []  # Store frame file paths for cleanup
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+if "chat_thread_id" not in st.session_state:
+    st.session_state.chat_thread_id = None
 
 
 def log_message(message: str, level: str = "info"):
@@ -79,13 +83,117 @@ def log_message(message: str, level: str = "info"):
         logger.info(message)
 
 
+def streamlit_show_image(image, caption: Optional[str] = None, width: Optional[int] = None):
+    """
+    Display an image across Streamlit versions.
+
+    Older Streamlit builds reject `use_container_width`; very old builds expect
+    `use_column_width` instead.
+    """
+    kwargs = {}
+    if caption is not None:
+        kwargs["caption"] = caption
+    if width is not None:
+        kwargs["width"] = width
+        st.image(image, **kwargs)
+        return
+    try:
+        st.image(image, **kwargs, use_container_width=True)
+    except TypeError:
+        try:
+            st.image(image, **kwargs, use_column_width=True)
+        except TypeError:
+            st.image(image, **kwargs)
+
+
+def pil_normalize_for_ui(pil_image):
+    """Return a PIL image safe for display / OCR (handles P, LA, CMYK, etc.)."""
+    from PIL import Image as PILImage
+
+    img = pil_image
+    if getattr(img, "mode", None) == "P" and "transparency" in img.info:
+        img = img.convert("RGBA")
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+    return img
+
+
+def pil_thumbnail_preview(pil_image, max_size: Tuple[int, int] = (240, 240)):
+    """Small preview image for the UI."""
+    from PIL import Image as PILImage
+
+    thumb = pil_normalize_for_ui(pil_image).copy()
+    thumb.thumbnail(max_size, PILImage.Resampling.LANCZOS)
+    return thumb
+
+
+def try_ocr_text(pil_image) -> Optional[str]:
+    """
+    Optional OCR via pytesseract + system Tesseract. Returns None if unavailable
+    or no text is found.
+    """
+    try:
+        import pytesseract  # type: ignore
+    except ImportError:
+        return None
+    try:
+        rgb = pil_normalize_for_ui(pil_image)
+        if rgb.mode == "RGBA":
+            rgb = rgb.convert("RGB")
+        raw = pytesseract.image_to_string(rgb)
+        text = (raw or "").strip()
+        return text if text else None
+    except Exception as e:
+        logger.debug("OCR skipped or failed: %s", e)
+        return None
+
+
+def show_image_preview_and_ocr(pil_image, title: str = "Image preview"):
+    """Thumbnail + optional OCR expander after an image is loaded."""
+    streamlit_show_image(
+        pil_thumbnail_preview(pil_image),
+        caption=f"{title} (thumbnail preview)",
+        width=260,
+    )
+    ocr = try_ocr_text(pil_image)
+    with st.expander("Extracted text (OCR)", expanded=False):
+        if ocr:
+            st.text(ocr)
+        else:
+            st.caption(
+                "No text detected, or OCR is not set up. "
+                "Install `pytesseract` and the system Tesseract binary for text extraction."
+            )
+
+
+def set_current_image(pil_image):
+    """Switch the active workspace to an image-only session."""
+    st.session_state.current_image = pil_image
+    st.session_state.current_video_id = None
+    st.session_state.transcript = None
+    st.session_state.chunks = None
+    st.session_state.visual_frames = {}
+    st.session_state.last_query_result = None
+    st.session_state.chat_messages = []
+    st.session_state.chat_thread_id = "image_session"
+
+
+def set_current_video(video_id: str):
+    """Switch the active workspace to a processed video session."""
+    st.session_state.current_video_id = video_id
+    st.session_state.current_image = None
+    st.session_state.last_query_result = None
+    st.session_state.chat_messages = []
+    st.session_state.chat_thread_id = video_id
+
+
 def initialize_components():
     """Initialize backend components (lazy loading)."""
     try:
         # Lazy import to avoid loading heavy dependencies on startup
         from backend.vectorstore import VectorStore
         from backend.embedder import Embedder
-        from backend.rag import RAGOrchestrator
+        from backend.rag import RAGOrchestrator, DEFAULT_RAG_TOP_K
 
         if st.session_state.vectorstore is None:
             st.session_state.vectorstore = VectorStore()
@@ -104,7 +212,7 @@ def initialize_components():
                 st.session_state.rag = RAGOrchestrator(
                     vectorstore=st.session_state.vectorstore,
                     embedder=embedder,
-                    top_k=5,
+                    top_k=DEFAULT_RAG_TOP_K,
                     llm_provider=llm_provider
                 )
                 log_message(f"RAG orchestrator initialized (provider: {llm_provider})")
@@ -172,14 +280,18 @@ def validate_video_file(file, file_path: Optional[str] = None) -> Tuple[bool, Op
 def process_video(file, video_id: str) -> bool:
     """
     Process uploaded video: extract audio, transcribe, chunk, embed, store.
-
-    Args:
-        file: Uploaded file object or file path (str)
-        video_id: Unique video identifier
-
-    Returns:
-        True if successful
     """
+    tmp_path = None
+    audio_path = None
+    temp_upload_created = False
+
+    def cleanup_processing_files():
+        """Remove temp files created while processing this request."""
+        if temp_upload_created and tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        if audio_path and audio_path != tmp_path and os.path.exists(audio_path):
+            os.unlink(audio_path)
+
     try:
         # Handle both file objects and file paths
         if isinstance(file, str):
@@ -215,6 +327,7 @@ def process_video(file, video_id: str) -> bool:
                 else:
                     raise ValueError("File object must have getvalue() or read() method")
                 tmp_path = tmp_file.name
+                temp_upload_created = True
 
         # Check video duration after saving
         file_ext = Path(tmp_path).suffix.lower()
@@ -225,18 +338,20 @@ def process_video(file, video_id: str) -> bool:
                 if duration > 0:
                     log_message(f"Video duration: {duration_minutes:.1f} minutes ({duration:.1f} seconds)")
                     if duration_minutes > MAX_VIDEO_DURATION_MINUTES:
-                        error_msg = f"Video duration ({
-                            duration_minutes:.1f} minutes) exceeds maximum ({MAX_VIDEO_DURATION_MINUTES} minutes)"
+                        error_msg = (
+                            f"Video duration ({duration_minutes:.1f} minutes) exceeds maximum "
+                            f"({MAX_VIDEO_DURATION_MINUTES} minutes)"
+                        )
                         log_message(error_msg, "error")
                         st.error(f"❌ {error_msg}")
                         st.info(f"💡 For longer videos, consider splitting them into smaller segments.")
+                        cleanup_processing_files()
                         return False
                     elif duration_minutes > MAX_VIDEO_DURATION_MINUTES * 0.8:
                         st.warning(
-                            f"⚠️ Video is {
-                                duration_minutes:.1f} minutes. Processing may take a while (~{
-                                duration_minutes * 3:.0f}-{
-                                duration_minutes * 5:.0f} minutes).")
+                            f"⚠️ Video is {duration_minutes:.1f} minutes. Processing may take a while "
+                            f"(~{duration_minutes * 3:.0f}-{duration_minutes * 5:.0f} minutes)."
+                        )
             except Exception as e:
                 logger.warning(f"Could not check video duration: {e}")
 
@@ -276,6 +391,7 @@ def process_video(file, video_id: str) -> bool:
                 error_msg = "Transcription returned no segments. Video may have no audio track or audio is too quiet."
                 log_message(error_msg, "error")
                 st.error(f"❌ {error_msg}")
+                cleanup_processing_files()
                 return False
 
             # Cache transcript
@@ -297,6 +413,7 @@ def process_video(file, video_id: str) -> bool:
             error_msg = "No chunks created from transcript. Video may have no audio or transcription failed."
             log_message(error_msg, "error")
             st.error(f"❌ {error_msg}")
+            cleanup_processing_files()
             return False
 
         # Extract video frames for visual context (if video file)
@@ -340,27 +457,24 @@ def process_video(file, video_id: str) -> bool:
         log_message("Storing in vector database...")
         initialize_components()
         embeddings_list = embeddings.tolist()
+        st.session_state.vectorstore.delete_by_video_id(video_id)
         st.session_state.vectorstore.add_chunks(chunks, embeddings_list)
         log_message("Stored in vector database")
 
-        # Cleanup (only if we created the temp file)
-        if not isinstance(file, str):
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        if audio_path and audio_path != tmp_path and os.path.exists(audio_path):
-            os.unlink(audio_path)
+        cleanup_processing_files()
 
         st.session_state.processed_videos[video_id] = {
             "filename": file_name if not isinstance(file, str) else Path(file).name,
             "segments": len(segments),
             "chunks": len(chunks)
         }
-        st.session_state.current_video_id = video_id
+        set_current_video(video_id)
 
         log_message("Processing complete!")
         return True
 
     except Exception as e:
+        cleanup_processing_files()
         log_message(f"Processing failed: {e}", "error")
         st.error(f"Processing error: {e}")
         return False
@@ -542,10 +656,20 @@ def show_main_app():
             st.rerun()
 
     # Main content area
-    tab1, tab2, tab3 = st.tabs(["📤 Upload & Process", "🔍 Query & Search", "📄 Export"])
+    pages = ["📤 Upload & Process", "💬 Chat", "📄 Export"]
+    if "main_page" not in st.session_state:
+        st.session_state.main_page = "📤 Upload & Process"
 
-    # Tab 1: Upload & Process
-    with tab1:
+    st.radio(
+        label="",
+        options=pages,
+        key="main_page",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    # Page 1: Upload & Process
+    if st.session_state.main_page == "📤 Upload & Process":
         st.header("Upload Video, Audio, or Image")
 
         # URL input section
@@ -612,8 +736,13 @@ def show_main_app():
 
                             except Exception as e:
                                 log_message(f"YouTube download failed: {e}", "error")
-                                st.error(f"Failed to download YouTube video: {e}")
-                                st.info("💡 Make sure yt-dlp is installed: pip install yt-dlp")
+                                st.error("Failed to download YouTube video.")
+                                st.caption(str(e))
+                                st.info(
+                                    "💡 If YouTube blocks the download, try another public video, "
+                                    "or download the video manually and upload it here."
+                                )
+                                st.caption("If needed: `pip install -U yt-dlp`")
 
                 elif is_valid_url(url_input):
                     # Check if it's likely an image or video
@@ -636,10 +765,11 @@ def show_main_app():
 
                                     from PIL import Image as PILImage
                                     pil_image = PILImage.open(image_path)
-                                    st.session_state.current_image = pil_image
+                                    pil_image.load()
+                                    set_current_image(pil_image)
 
-                                    st.image(pil_image, caption="Downloaded Image", use_container_width=True)
-                                    st.success("✅ Image loaded! You can now ask questions about it in the Query & Search tab.")
+                                    show_image_preview_and_ocr(pil_image, title="Downloaded image")
+                                    st.success("✅ Image loaded! You can now ask questions about it in the Chat tab.")
 
                                     # Cleanup
                                     try:
@@ -659,7 +789,7 @@ def show_main_app():
                                 try:
                                     log_message("Downloading video from URL...")
                                     from utils.url_downloader import download_video_from_url
-                                    video_path = download_video_from_url(url_input)
+                                    video_path = download_video_from_url(url_input, max_bytes=MAX_FILE_SIZE_BYTES)
                                     log_message(f"Video downloaded: {video_path}")
 
                                     # Process the downloaded video directly using file path
@@ -699,15 +829,15 @@ def show_main_app():
                 from PIL import Image as PILImage
                 import io
 
-                # Load image
+                # Load image (force decode so complex formats fail early with a clear error)
                 image_bytes = uploaded_image.read()
                 pil_image = PILImage.open(io.BytesIO(image_bytes))
-                st.session_state.current_image = pil_image
+                pil_image.load()
+                set_current_image(pil_image)
 
-                # Display image
-                st.image(pil_image, caption=uploaded_image.name, use_container_width=True)
+                show_image_preview_and_ocr(pil_image, title=uploaded_image.name)
 
-                st.success("✅ Image loaded! You can now ask questions about it in the Query & Search tab.")
+                st.success("✅ Image loaded! You can now ask questions about it in the Chat tab.")
 
             except Exception as e:
                 st.error(f"Failed to load image: {e}")
@@ -749,163 +879,230 @@ def show_main_app():
                     for log_entry in st.session_state.processing_log[-20:]:  # Last 20 entries
                         st.text(log_entry)
 
-    # Tab 2: Query & Search
-    with tab2:
-        st.header("Semantic Search & RAG Summarization")
+    # Page 2: Chat (RAG + optional image)
+    elif st.session_state.main_page == "💬 Chat":
+        st.header("Chat with your content")
 
         # Show status
         if st.session_state.current_image and not st.session_state.current_video_id:
-            st.info("🖼️ Image loaded! Ask questions about the image. (Requires Gemini API)")
+            st.info("🖼️ Image loaded — ask questions below. (Gemini API required for image chat.)")
+            col_thumb, _ = st.columns([1, 4])
+            with col_thumb:
+                streamlit_show_image(
+                    pil_thumbnail_preview(st.session_state.current_image),
+                    caption="Current image",
+                    width=140,
+                )
         elif st.session_state.current_video_id is None:
             st.warning("⚠️ Please upload and process a video or upload an image first.")
 
         if st.session_state.current_video_id or st.session_state.current_image:
-            # Query input
-            if st.session_state.current_image and not st.session_state.current_video_id:
-                placeholder = "e.g., 'What is shown in this image?' or 'Describe the main elements in this picture'"
-            else:
-                placeholder = "e.g., 'Summarize this lecture into 5 concise bullet points'"
-            
-            query = st.text_area(
-                "Enter your query or prompt:",
-                placeholder=placeholder,
-                height=100
+            thread_key = (
+                st.session_state.current_video_id
+                if st.session_state.current_video_id
+                else "image_session"
             )
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                prompt_type = st.selectbox(
-                    "Prompt Type",
-                    ["summary", "notes", "qa"],
-                    help="summary: concise summary, notes: structured notes, qa: question answering"
-                )
-            with col2:
-                top_k = st.slider("Top K Results", 3, 10, 5)
-            
-            if st.button("🔍 Search & Generate", type="primary"):
-                if query:
-                    with st.spinner("Searching and generating..."):
-                        try:
-                            initialize_components()
-                            st.session_state.rag.top_k = top_k
-                            
-                            # Prepare visual context
-                            visual_context = None
-                            
-                            # If we have a processed video with frames, use them
-                            if st.session_state.current_video_id and st.session_state.visual_frames:
-                                visual_context = st.session_state.visual_frames
-                            
-                            # If we have an uploaded image, use it for direct Q&A
-                            if st.session_state.current_image and not st.session_state.current_video_id:
-                                # For image-only queries, create a special context
-                                visual_context = {
-                                    "image_query": [{
-                                        "image": st.session_state.current_image,
-                                        "timestamp": 0.0
-                                    }]
-                                }
-                                # Use Gemini directly for image Q&A
-                                if st.session_state.rag.llm_provider == "gemini":
-                                    try:
-                                        import google.generativeai as genai
-                                        model = genai.GenerativeModel("gemini-2.5-flash")
-                                        response = model.generate_content([
-                                            query,
-                                            st.session_state.current_image
-                                        ])
-                                        result = {
-                                            "summary": response.text.strip(),
-                                            "evidence": [],
-                                            "query": query
-                                        }
-                                        # Store result for potential export
-                                        st.session_state.last_query_result = result
-                                    except Exception as e:
-                                        st.error(f"Image Q&A failed: {e}")
-                                        result = {
-                                            "summary": "Image Q&A requires Gemini API. Please set GEMINI_API_KEY.",
-                                            "evidence": [],
-                                            "query": query
-                                        }
-                                        st.session_state.last_query_result = result
-                                else:
-                                    result = {
-                                        "summary": "Image Q&A requires Gemini API. Please set GEMINI_API_KEY in .env",
-                                        "evidence": [],
-                                        "query": query
-                                    }
-                                    st.session_state.last_query_result = result
-                            else:
-                                # Normal video/transcript query
-                                result = st.session_state.rag.generate(
-                                    query=query,
-                                    video_id=st.session_state.current_video_id,
-                                    prompt_type=prompt_type,
-                                    visual_context=visual_context
+            if st.session_state.chat_thread_id != thread_key:
+                st.session_state.chat_messages = []
+                st.session_state.chat_thread_id = thread_key
+
+            for message in st.session_state.chat_messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            chat_placeholder = (
+                "Ask anything about this image…"
+                if st.session_state.current_image and not st.session_state.current_video_id
+                else "Ask about this video — e.g. summarise in 100 words, key takeaways, or a question…"
+            )
+
+            if "chat_draft" not in st.session_state:
+                st.session_state.chat_draft = ""
+
+            def _send_chat_message():
+                prompt = (st.session_state.chat_draft or "").strip()
+                if not prompt:
+                    return
+
+                initialize_components()
+
+                visual_context = None
+                if st.session_state.current_video_id and st.session_state.visual_frames:
+                    visual_context = st.session_state.visual_frames
+
+                try:
+                    with st.spinner("Thinking…"):
+                        if st.session_state.current_image and not st.session_state.current_video_id:
+                            if st.session_state.rag.llm_provider == "gemini":
+                                import google.generativeai as genai
+                                from backend.rag import (
+                                    gemini_safety_settings_lenient,
+                                    DEFAULT_LLM_MAX_OUTPUT_TOKENS,
                                 )
-                            
-                            # Store result for PDF export
-                            st.session_state.last_query_result = result
-                            
-                            # Display summary
-                            st.subheader("📊 Summary")
-                            st.markdown(result["summary"])
-                            
-                        except Exception as e:
-                            st.error(f"Query failed: {e}")
-                            log_message(f"Query error: {e}", "error")
-                else:
-                    st.warning("Please enter a query.")
+
+                                safety = gemini_safety_settings_lenient()
+                                model = genai.GenerativeModel(
+                                    "gemini-2.5-flash",
+                                    safety_settings=safety,
+                                )
+                                response = model.generate_content(
+                                    [prompt, st.session_state.current_image],
+                                    generation_config=genai.types.GenerationConfig(
+                                        max_output_tokens=DEFAULT_LLM_MAX_OUTPUT_TOKENS,
+                                        temperature=0.7,
+                                    ),
+                                    safety_settings=safety,
+                                )
+                                assistant_text = (response.text or "").strip()
+                                result = {
+                                    "summary": assistant_text,
+                                    "evidence": [],
+                                    "query": prompt,
+                                }
+                            else:
+                                assistant_text = (
+                                    "Image chat needs Gemini. Set GEMINI_API_KEY in `.env`."
+                                )
+                                result = {
+                                    "summary": assistant_text,
+                                    "evidence": [],
+                                    "query": prompt,
+                                }
+                        else:
+                            result = st.session_state.rag.generate(
+                                query=prompt,
+                                video_id=st.session_state.current_video_id,
+                                prompt_type="assistant",
+                                visual_context=visual_context,
+                            )
+                            assistant_text = result["summary"]
+
+                    st.session_state.chat_messages.append(
+                        {"role": "user", "content": prompt}
+                    )
+                    st.session_state.chat_messages.append(
+                        {"role": "assistant", "content": assistant_text}
+                    )
+                    st.session_state.last_query_result = result
+                    st.session_state.chat_draft = ""
+                    st.session_state.main_page = "💬 Chat"
+
+                except Exception as e:
+                    st.session_state.chat_messages.append(
+                        {"role": "user", "content": prompt}
+                    )
+                    st.session_state.chat_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": f"Something went wrong: {e}",
+                        }
+                    )
+                    log_message(f"Chat error: {e}", "error")
+                    st.session_state.chat_draft = ""
+                    st.session_state.main_page = "💬 Chat"
+
+            # `st.chat_input` cannot be used inside tabs, so we emulate it with a text box.
+            st.text_input(
+                label="Message",
+                placeholder=chat_placeholder,
+                key="chat_draft",
+                on_change=_send_chat_message,
+                label_visibility="collapsed",
+            )
+            st.button("Send", type="primary", on_click=_send_chat_message)
     
-    # Tab 3: Export
-    with tab3:
+    # Page 3: Export
+    else:
         st.header("Export Notes to PDF")
         
-        if st.session_state.current_video_id is None:
-            st.warning("⚠️ Please upload and process a video first.")
+        if st.session_state.current_video_id is None and st.session_state.current_image is None:
+            st.warning("⚠️ Please upload and process a video or upload an image first.")
         else:
             # Get last query result if available
             export_title = st.text_input(
                 "Document Title",
-                value="Video Notes",
+                value="Notes",
                 help="Title for the PDF document"
             )
             
             if st.button("📥 Export PDF", type="primary"):
                 try:
-                    # Use last query result if available, otherwise generate default
+                    # Use last query result if available; otherwise generate default notes.
+                    result = None
                     if st.session_state.last_query_result:
                         result = st.session_state.last_query_result
-                        query = result.get("query", "Video Summary")
-                        st.info("📄 Using last query result for export")
-                    elif st.session_state.chunks:
-                        initialize_components()
-                        st.info("💡 Generating default summary for export...")
-                        
-                        # Generate a default summary
-                        query = "Summarize the main content"
-                        result = st.session_state.rag.generate(
-                            query=query,
-                            video_id=st.session_state.current_video_id,
-                            prompt_type="notes"
-                        )
+                        st.info("📄 Using last chat result for export")
                     else:
-                        st.error("❌ No content available. Please process a video first.")
-                        st.stop()
+                        initialize_components()
+                        st.info("💡 Generating default notes for export...")
+
+                        # Video default notes
+                        if st.session_state.current_video_id and st.session_state.chunks:
+                            default_prompt = "Create structured notes (overview, key concepts, examples, action items)."
+                            result = st.session_state.rag.generate(
+                                query=default_prompt,
+                                video_id=st.session_state.current_video_id,
+                                prompt_type="notes",
+                            )
+                        # Image default notes (Gemini only)
+                        elif st.session_state.current_image and st.session_state.rag.llm_provider == "gemini":
+                            import google.generativeai as genai
+                            from backend.rag import (
+                                gemini_safety_settings_lenient,
+                                DEFAULT_LLM_MAX_OUTPUT_TOKENS,
+                            )
+
+                            safety = gemini_safety_settings_lenient()
+                            model = genai.GenerativeModel(
+                                "gemini-2.5-flash",
+                                safety_settings=safety,
+                            )
+                            image_prompt = (
+                                "Create structured notes from this image.\n"
+                                "Start with: 'This image is about: <one-sentence topic>'.\n"
+                                "Then include sections: Overview, Key Points, Extracted Facts/Numbers, and Action Items.\n"
+                                "Do not mention that you are an AI or that this was generated. Do not include references."
+                            )
+                            response = model.generate_content(
+                                [image_prompt, st.session_state.current_image],
+                                generation_config=genai.types.GenerationConfig(
+                                    max_output_tokens=DEFAULT_LLM_MAX_OUTPUT_TOKENS,
+                                    temperature=0.5,
+                                ),
+                                safety_settings=safety,
+                            )
+                            result = {
+                                "summary": (response.text or "").strip(),
+                                "evidence": [],
+                                "query": image_prompt,
+                            }
+                        else:
+                            st.error(
+                                "❌ No content available for export. "
+                                "For images, Gemini is required (set GEMINI_API_KEY)."
+                            )
+                            st.stop()
                     
                     # Export PDF
                     from backend.pdf_export import PDFExporter
                     pdf_exporter = PDFExporter()
-                    output_path = f"notes_{st.session_state.current_video_id[:8]}.pdf"
+                    file_tag = (
+                        st.session_state.current_video_id[:8]
+                        if st.session_state.current_video_id
+                        else "image"
+                    )
+                    output_filename = f"notes_{file_tag}.pdf"
+                    output_path = str(Path(tempfile.gettempdir()) / output_filename)
                     
                     pdf_exporter.export_notes(
                         output_path=output_path,
                         title=export_title,
                         summary=result["summary"],
                         evidence=result.get("evidence", []),
-                        query=query,
-                        video_id=st.session_state.current_video_id
+                        query=None,
+                        video_id=None,
+                        include_metadata=False,
+                        include_evidence=False,
                     )
                     
                     # Provide download
@@ -913,11 +1110,11 @@ def show_main_app():
                         st.download_button(
                             label="⬇️ Download PDF",
                             data=pdf_file.read(),
-                            file_name=output_path,
+                            file_name=output_filename,
                             mime="application/pdf"
                         )
 
-                    st.success(f"✅ PDF generated: {output_path}")
+                    st.success(f"✅ PDF generated: {output_filename}")
                     
                 except Exception as e:
                     st.error(f"Export failed: {e}")
