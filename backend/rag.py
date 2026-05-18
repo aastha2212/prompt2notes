@@ -393,7 +393,7 @@ class RAGOrchestrator:
     def _local_summarizer(self, prompt: str) -> str:
         """
         Simple local summarizer (deterministic fallback).
-        Extracts key sentences and formats them.
+        Extracts key sentences and formats them into a readable answer.
         
         Args:
             prompt: Input prompt with context
@@ -402,13 +402,22 @@ class RAGOrchestrator:
             Summarized text
         """
         # Extract the context body from the prompt. This fallback is intentionally
-        # simple, but it should still look like a summary rather than prompt text.
+        # simple, but it should still look like an answer rather than raw transcript.
         lines = prompt.split("\n")
         context_start = False
         context_text = []
+        user_message = ""
+        user_match = re.search(r"^(?:User message|Query|Question):\s*(.+)$", prompt, flags=re.MULTILINE)
+        if user_match:
+            user_message = user_match.group(1).strip()
         
         for line in lines:
             stripped = line.strip()
+            if not user_message and stripped.startswith(("User message:", "Query:", "Question:")):
+                user_message = stripped.split(":", 1)[1].strip()
+                if context_start:
+                    break
+                continue
             if stripped == "---":
                 if context_start:
                     break
@@ -423,19 +432,84 @@ class RAGOrchestrator:
                 cleaned_line = re.sub(r"^\[.*?\]\s*", "", cleaned_line)
                 if cleaned_line:
                     context_text.append(cleaned_line)
-        
-        # Simple extraction: take first few sentences and key phrases
-        full_context = " ".join(context_text)
-        sentences = re.split(r'[.!?]+', full_context)
-        sentences = [s.strip() for s in sentences if s.strip()]
-        
-        # Return first 3-5 sentences as summary
-        summary_sentences = sentences[:5]
-        summary = ". ".join(summary_sentences)
-        if summary and not summary.endswith("."):
-            summary += "."
 
-        return clean_generated_answer(summary) or "Summary could not be generated."
+        if not context_text and prompt.strip():
+            context_text = [prompt]
+
+        full_context = " ".join(context_text)
+        full_context = re.sub(r"\s+", " ", full_context).strip()
+        sentences = re.split(r'(?<=[.!?])\s+', full_context)
+        sentences = [clean_generated_answer(s.strip()) for s in sentences if s.strip()]
+        sentences = [s for s in sentences if s]
+
+        if not sentences:
+            return "Summary could not be generated."
+
+        query_lower = user_message.lower()
+        wants_topic = any(
+            phrase in query_lower
+            for phrase in (
+                "main topic",
+                "what it is about",
+                "what is it about",
+                "summarise",
+                "summarize",
+                "summary",
+            )
+        )
+
+        topic = self._infer_local_topic(sentences)
+        key_points = self._select_local_key_points(sentences, limit=4)
+
+        if wants_topic:
+            bullets = "\n".join(f"- {point}" for point in key_points)
+            if bullets:
+                return clean_generated_answer(
+                    f"This video is about: {topic}\n\nKey points:\n{bullets}"
+                )
+            return clean_generated_answer(f"This video is about: {topic}")
+
+        answer_sentences = key_points or sentences[:3]
+        answer = " ".join(answer_sentences)
+        return clean_generated_answer(answer) or "Summary could not be generated."
+
+    def _infer_local_topic(self, sentences: List[str]) -> str:
+        """Infer a short topic sentence for local/offline fallback mode."""
+        if not sentences:
+            return "the uploaded content"
+
+        candidates = [
+            s for s in sentences
+            if 40 <= len(s) <= 220 and not s.lower().startswith(("walks into", "and ", "but "))
+        ]
+        best = candidates[0] if candidates else sentences[0]
+
+        # Keep the topic concise but avoid chopping tiny fragments.
+        best = best.strip()
+        if len(best) > 170:
+            cut = best[:170].rsplit(" ", 1)[0].rstrip(",;:")
+            best = cut + "."
+        if not best.endswith((".", "!", "?")):
+            best += "."
+        return best
+
+    def _select_local_key_points(self, sentences: List[str], limit: int = 4) -> List[str]:
+        """Choose readable, non-duplicate sentences for local fallback summaries."""
+        selected = []
+        seen = set()
+        for sentence in sentences:
+            normalized = re.sub(r"\W+", " ", sentence.lower()).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if len(sentence) < 25:
+                continue
+            if not sentence.endswith((".", "!", "?")):
+                sentence += "."
+            selected.append(sentence)
+            if len(selected) >= limit:
+                break
+        return selected
     
     def retrieve(self, query: str, video_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """

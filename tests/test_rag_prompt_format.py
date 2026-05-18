@@ -230,6 +230,37 @@ def test_rag_local_summarizer(mock_vectorstore, mock_embedder):
     assert len(summary) > 0
 
 
+def test_local_summarizer_main_topic_is_not_raw_echo(mock_vectorstore, mock_embedder):
+    """Local fallback should answer topic/summary requests clearly."""
+    rag = RAGOrchestrator(
+        vectorstore=mock_vectorstore,
+        embedder=mock_embedder,
+        llm_provider="local",
+    )
+
+    prompt = """You help someone understand video content using the transcript excerpts below.
+
+Context from video transcript:
+---
+Transcript excerpt 1 for internal grounding only (00:00-01:10):
+Walks into whatever's next with a full tank. The seconds between stimulus and response are where emotional regulation happens. The speaker explains how calm decision-making helps people avoid panic and respond with clarity.
+---
+
+User message: give the main topic what it is about
+
+Instructions:
+- Answer in a direct, substantive way.
+
+Your response:"""
+
+    summary = rag._local_summarizer(prompt)
+
+    assert summary.startswith("This video is about:")
+    assert "Key points:" in summary
+    assert "Transcript excerpt" not in summary
+    assert "User message" not in summary
+
+
 def test_rag_hierarchical_summarize(mock_vectorstore, mock_embedder):
     """Test hierarchical summarization."""
     chunks = [
